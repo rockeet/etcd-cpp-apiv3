@@ -233,7 +233,8 @@ etcd::Client::Client(std::string const & address,
                      std::string const & load_balancer)
 {
   // create channels
-  std::string const addresses = etcd::detail::strip_and_resolve_addresses(address);
+  // std::string const addresses = etcd::detail::strip_and_resolve_addresses(address);
+  std::string const& addresses = address;
   grpc::ChannelArguments grpc_args;
   grpc_args.SetMaxSendMessageSize(std::numeric_limits<int>::max());
   grpc_args.SetMaxReceiveMessageSize(std::numeric_limits<int>::max());
