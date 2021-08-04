@@ -1,4 +1,5 @@
 #include <grpc/support/log.h>
+#include "etcd/v3/action_constants.hpp"
 #include "etcd/v3/Action.hpp"
 
 etcdv3::Action::Action(etcdv3::ActionParameters params)
@@ -36,4 +37,19 @@ void etcdv3::Action::waitForResponse()
 
 const std::chrono::high_resolution_clock::time_point etcdv3::Action::startTimepoint() {
   return this->start_timepoint;
+}
+
+std::string etcdv3::detail::string_plus_one(std::string const &value) {
+  // referred from the Go implementation in etcd.
+  char *s = static_cast<char *>(calloc(value.size() + 1, sizeof(char)));
+  std::memcpy(s, value.c_str(), value.size());
+  for (int i = value.size() - 1; i >= 0; --i) {
+    if (static_cast<unsigned char>(s[i]) < 0xff) {
+      s[i] = s[i] + 1;
+      std::string ret = std::string(s, i + 1);
+      free(s);
+      return ret;
+    }
+  }
+  return {etcdv3::NUL};
 }

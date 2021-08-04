@@ -9,8 +9,8 @@ using etcdserverpb::WatchCreateRequest;
 etcdv3::AsyncWatchAction::AsyncWatchAction(etcdv3::ActionParameters param)
   : etcdv3::Action(param) 
 {
-  isCancelled = false;
-  stream = parameters.watch_stub->AsyncWatch(&context,&cq_,(void*)"create");
+  isCancelled.store(false);
+  stream = parameters.watch_stub->AsyncWatch(&context,&cq_,(void*)etcdv3::WATCH_CREATE);
 
   WatchRequest watch_req;
   WatchCreateRequest watch_create_req;
@@ -20,10 +20,14 @@ etcdv3::AsyncWatchAction::AsyncWatchAction(etcdv3::ActionParameters param)
 
   if(parameters.withPrefix)
   {
-    std::string range_end(parameters.key); 
-    int ascii = (int)range_end[range_end.length()-1];
-    range_end.back() = ascii+1;
-    watch_create_req.set_range_end(range_end);
+    if (parameters.key.empty()) {
+      watch_create_req.set_range_end(detail::string_plus_one(etcdv3::NUL));
+    } else {
+      watch_create_req.set_range_end(detail::string_plus_one(parameters.key));
+    }
+  }
+  if(!parameters.range_end.empty()) {
+    watch_create_req.set_range_end(parameters.range_end);
   }
 
   watch_req.mutable_create_request()->CopyFrom(watch_create_req);
@@ -31,14 +35,14 @@ etcdv3::AsyncWatchAction::AsyncWatchAction(etcdv3::ActionParameters param)
   // wait "create" success (the stream becomes ready)
   void *got_tag;
   bool ok = false;
-  if (cq_.Next(&got_tag, &ok) && ok && got_tag == (void *)"create") {
-    stream->Write(watch_req, (void *)"write");
+  if (cq_.Next(&got_tag, &ok) && ok && got_tag == (void *)etcdv3::WATCH_CREATE) {
+    stream->Write(watch_req, (void *)etcdv3::WATCH_WRITE);
   } else {
     throw std::runtime_error("failed to create a watch connection");
   }
 
   // wait "write" (WatchCreateRequest) success, and start to read the first reply
-  if (cq_.Next(&got_tag, &ok) && ok && got_tag == (void *)"write") {
+  if (cq_.Next(&got_tag, &ok) && ok && got_tag == (void *)etcdv3::WATCH_WRITE) {
     stream->Read(&reply, (void*)this);
   } else {
     throw std::runtime_error("failed to write WatchCreateRequest to server");
@@ -56,15 +60,15 @@ void etcdv3::AsyncWatchAction::waitForResponse()
     {
       break;
     }
-    if(got_tag == (void*)"writes done") {
-      isCancelled = true;
+    if(got_tag == (void*)etcdv3::WATCH_WRITES_DONE) {
+      isCancelled.store(true);
       cq_.Shutdown();
       break;
     }
     if(got_tag == (void*)this) // read tag
     {
       if (reply.canceled()) {
-        isCancelled = true;
+        isCancelled.store(true);
         cq_.Shutdown();
       }
       else if ((reply.created() && reply.header().revision() < parameters.revision) ||
@@ -73,8 +77,8 @@ void etcdv3::AsyncWatchAction::waitForResponse()
         //
         // 1. watch for a future revision, return immediately with empty events set
         // 2. receive any effective events.
-        isCancelled = true;
-        stream->WritesDone((void*)"writes done");
+        isCancelled.store(true);
+        stream->WritesDone((void*)etcdv3::WATCH_WRITES_DONE);
         grpc::Status status;
         stream->Finish(&status, (void *)this);
         cq_.Shutdown();
@@ -96,10 +100,8 @@ void etcdv3::AsyncWatchAction::waitForResponse()
 void etcdv3::AsyncWatchAction::CancelWatch()
 {
   std::lock_guard<std::mutex> scope_lock(this->protect_is_cancalled);
-  if(isCancelled == false)
-  {
-    isCancelled = true;
-    stream->WritesDone((void*)"writes done");
+  if (!isCancelled.exchange(true)) {
+    stream->WritesDone((void*)etcdv3::WATCH_WRITES_DONE);
     grpc::Status status;
     stream->Finish(&status, (void *)this);
     cq_.Shutdown();
@@ -107,7 +109,7 @@ void etcdv3::AsyncWatchAction::CancelWatch()
 }
 
 bool etcdv3::AsyncWatchAction::Cancelled() const {
-  return isCancelled;
+  return isCancelled.load();
 }
 
 void etcdv3::AsyncWatchAction::waitForResponse(std::function<void(etcd::Response)> callback) 
@@ -121,16 +123,16 @@ void etcdv3::AsyncWatchAction::waitForResponse(std::function<void(etcd::Response
     {
       break;
     }
-    if(got_tag == (void*)"writes done")
+    if(got_tag == (void*)etcdv3::WATCH_WRITES_DONE)
     {
-      isCancelled = true;
+      isCancelled.store(true);
       cq_.Shutdown();
       break;
     }
     else if(got_tag == (void*)this) // read tag
     {
       if (reply.canceled()) {
-        isCancelled = true;
+        isCancelled.store(true);
         cq_.Shutdown();
         if (reply.compact_revision() != 0) {
           callback(etcd::Response(grpc::StatusCode::OUT_OF_RANGE /* error code */,
@@ -155,7 +157,6 @@ void etcdv3::AsyncWatchAction::waitForResponse(std::function<void(etcd::Response
 
 etcdv3::AsyncWatchResponse etcdv3::AsyncWatchAction::ParseResponse()
 {
-
   AsyncWatchResponse watch_resp;
   if(!status.ok())
   {

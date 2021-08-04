@@ -5,14 +5,27 @@
 #include <mutex>
 #include <string>
 
-#include <grpc++/grpc++.h>
 #include "pplx/pplxtasks.h"
 
 #include "etcd/Response.hpp"
 
 namespace etcdv3 {
   class Transaction;
+
+  namespace detail {
+    std::string string_plus_one(std::string const &value);
+  }
 }
+
+#if defined(WITH_GRPC_CHANNEL_CLASS)
+namespace grpc {
+  class Channel;
+}
+#else
+namespace grpc_impl {
+  class Channel;
+}
+#endif
 
 namespace etcd
 {
@@ -97,7 +110,12 @@ namespace etcd
            std::string const & load_balancer = "round_robin");
 
     /**
-     * Sends a get request to the etcd server
+     * Get the HEAD revision of the connected etcd server.
+     */
+    pplx::task<Response> head();
+
+    /**
+     * Get the value of specified key from the etcd server
      * @param key is the key to be read
      */
     pplx::task<Response> get(std::string const & key);
@@ -224,6 +242,26 @@ namespace etcd
      */
     pplx::task<Response> ls(std::string const & key, size_t const limit);
 
+    /**
+     * Gets a directory listing of the directory identified by the key and range_end, i.e., get
+     * all keys in the range [key, range_end).
+     *
+     * @param key is the key to be listed
+     * @param range_end is the end of key range to be listed
+     */
+    pplx::task<Response> ls(std::string const & key, std::string const &range_end);
+
+
+    /**
+     * Gets a directory listing of the directory identified by the key and range_end, i.e., get
+     * all keys in the range [key, range_end).
+     *
+     * @param key is the key to be listed
+     * @param range_end is the end of key range to be listed
+     * @param limit is the size limit of results to be listed, we don't use default parameters
+     *        to ensure backwards binary compatibility.
+     */
+    pplx::task<Response> ls(std::string const & key, std::string const &range_end, size_t const limit);
 
     /**
      * Removes a directory node. Fails if the parent directory dos not exists or not a directory.
@@ -231,6 +269,24 @@ namespace etcd
      * @param recursive if true then delete a whole subtree, otherwise deletes only an empty directory.
      */
     pplx::task<Response> rmdir(std::string const & key, bool recursive = false);
+
+    /**
+     * Removes multiple keys between [key, range_end).
+     *
+     * This overload for `const char *` is to avoid const char * to bool implicit casting.
+     *
+     * @param key is the directory to be created to be listed
+     * @param range_end is the end of key range to be removed.
+     */
+    pplx::task<Response> rmdir(std::string const & key, const char *range_end);
+
+    /**
+     * Removes multiple keys between [key, range_end).
+     *
+     * @param key is the directory to be created to be listed
+     * @param range_end is the end of key range to be removed.
+     */
+    pplx::task<Response> rmdir(std::string const & key, std::string const &range_end);
 
     /**
      * Watches for changes of a key or a subtree. Please note that if you watch e.g. "/testdir" and
@@ -251,10 +307,45 @@ namespace etcd
     pplx::task<Response> watch(std::string const & key, int fromIndex, bool recursive = false);
 
     /**
+     * Watches for changes of a range of keys inside [key, range_end).
+     *
+     * This overload for `const char *` is to avoid const char * to bool implicit casting.
+     *
+     * @param key is the value or directory to be watched
+     * @param range_end is the end of key range to be removed.
+     */
+    pplx::task<Response> watch(std::string const & key, const char *range_end);
+
+    /**
+     * Watches for changes of a range of keys inside [key, range_end).
+     *
+     * @param key is the value or directory to be watched
+     * @param range_end is the end of key range to be removed.
+     */
+    pplx::task<Response> watch(std::string const & key, std::string const &range_end);
+
+    /**
+     * Watches for changes of a range of keys inside [key, range_end) from a specific index. The index value
+     * can be in the "past".
+     *
+     * Watches for changes of a key or a subtree from a specific index. The index value can be in the "past".
+     * @param key is the value or directory to be watched
+     * @param range_end is the end of key range to be removed.
+     * @param fromIndex the first index we are interested in
+     */
+    pplx::task<Response> watch(std::string const & key, std::string const &range_end, int fromIndex);
+
+    /**
      * Grants a lease.
      * @param ttl is the time to live of the lease
      */
     pplx::task<Response> leasegrant(int ttl);
+
+    /**
+     * Grants a lease.
+     * @param ttl is the time to live of the lease
+     */
+    pplx::task<std::shared_ptr<KeepAlive>> leasekeepalive(int ttl);
 
     /**
      * Revoke a lease.
@@ -288,7 +379,7 @@ namespace etcd
      * of by the library.
      * @param key is the key to be used to request the lock.
      */
-    pplx::task<Response> lock(std::string const &key, int64_t lease_id);
+    pplx::task<Response> lock_with_lease(std::string const &key, int64_t lease_id);
 
     /**
      * Releases a lock at a key.
@@ -303,7 +394,11 @@ namespace etcd
     pplx::task<Response> txn(etcdv3::Transaction const &txn);
 
   private:
+#if defined(WITH_GRPC_CHANNEL_CLASS)
     std::shared_ptr<grpc::Channel> channel;
+#else
+    std::shared_ptr<grpc_impl::Channel> channel;
+#endif
     std::string auth_token;
 
     struct EtcdServerStubs;

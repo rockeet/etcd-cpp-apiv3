@@ -4,10 +4,13 @@ project (etcd-cpp-api)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(etcd-cpp-api_VERSION_MAJOR 0)
-set(etcd-cpp-api_VERSION_MINOR 1)
-set(etcd-cpp-api_VERSION ${etcd-cpp-api_MAJOR_VERSION}.${etcd-cpp-api_MINOR_VERSION})
+set(etcd-cpp-api_VERSION_MINOR 2)
+set(etcd-cpp-api_VERSION_PATCH 1)
+set(etcd-cpp-api_VERSION ${etcd-cpp-api_VERSION_MAJOR}.${etcd-cpp-api_VERSION_MINOR}.${etcd-cpp-api_VERSION_PATCH})
+set(CMAKE_PROJECT_HOMEPAGE_URL https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3)
 
 include(CheckCXXCompilerFlag)
+include(CheckCXXSourceCompiles)
 include(CheckLibraryExists)
 include(GNUInstallDirs)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -51,6 +54,15 @@ endif()
 
 find_package(OpenSSL REQUIRED)
 find_package(Protobuf REQUIRED)
+if(Protobuf_PROTOC_EXECUTABLE)
+    if(NOT TARGET protobuf::protoc)
+        add_executable(protobuf::protoc IMPORTED)
+        if(EXISTS "${Protobuf_PROTOC_EXECUTABLE}")
+            set_target_properties(protobuf::protoc PROPERTIES
+                IMPORTED_LOCATION "${Protobuf_PROTOC_EXECUTABLE}")
+        endif()
+    endif()
+endif()
 find_package(cpprestsdk QUIET)
 if(cpprestsdk_FOUND)
     set(CPPREST_INCLUDE_DIR)
@@ -84,14 +96,23 @@ if(NOT CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wpedantic -Werror -Wno-string-compare -std=c++11")
 endif()
 
+set(CMAKE_REQUIRED_INCLUDES "${CMAKE_REQUIRED_INCLUDES} ${GRPC_INCLUDE_DIR}")
+set(CMAKE_REQUIRED_LIBRARIES "${CMAKE_REQUIRED_LIBRARIES} ${GRPC_LIBRARIES}")
+set(CMAKE_REQUIRED_DEFINITIONS "${CMAKE_REQUIRED_DEFINITIONS}")
+check_cxx_source_compiles("
+#include <grpc++/grpc++.h>
+namespace grpc { class Channel; }
+int main() {}
+" GRPC_CHANNEL_CLASS_FOUND)
+if(GRPC_CHANNEL_CLASS_FOUND)
+    add_definitions(-DWITH_GRPC_CHANNEL_CLASS)
+endif()
+
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
 
+enable_testing()
 add_subdirectory(src)
-
-if (BUILD_ETCD_TESTS)
-    enable_testing()
-    add_subdirectory(tst)
-endif ()
+add_subdirectory(tst)
 
 install (FILES ${CMAKE_CURRENT_SOURCE_DIR}/etcd/Client.hpp
                ${CMAKE_CURRENT_SOURCE_DIR}/etcd/KeepAlive.hpp
@@ -120,3 +141,76 @@ install(EXPORT etcd-targets
         FILE etcd-targets.cmake
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/etcd-cpp-api
 )
+
+# deb/rpc packaging for Linux
+
+set(CPACK_PACKAGE_NAME ${CMAKE_PROJECT_NAME})
+set(CPACK_PACKAGE_VENDOR etcd-cpp-apiv3)
+set(CPACK_PACKAGE_CONTACT "Tao He <sighingnow@gmail.com>")
+set(CPACK_PACKAGE_VERSION "${etcd-cpp-api_VERSION}")
+set(CPACK_PACKAGE_VERSION_MAJOR "${etcd-cpp-api_VERSION_MAJOR}")
+set(CPACK_PACKAGE_VERSION_MINOR "${etcd-cpp-api_VERSION_MINOR}")
+set(CPACK_PACKAGE_VERSION_PATCH "${etcd-cpp-api_VERSION_PATCH}")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "The etcd-cpp-apiv3 is a C++ API for etcd's v3 client API, i.e., `ETCDCTL_API=3`.")
+
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.txt")
+set(CPACK_RESOURCE_FILE_README "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
+set(CPACK_SOURCE_IGNORE_FILES ".git" "${PROJECT_BINARY_DIR}")
+
+set(CPACK_CMAKE_GENERATOR "Unix Makefiles")
+set(CPACK_GENERATOR "STGZ;TGZ")
+set(CPACK_SOURCE_GENERATOR "TGZ")
+include(CPack)
+
+# generate deb for ppa
+#
+# requires: apt-get install devscripts
+set(CPACK_DEBIAN_BUILD_DEPENDS   "ca-certificates,
+                                  debhelper,
+                                  gcc,
+                                  g++,
+                                  libboost-all-dev,
+                                  libcpprest-dev,
+                                  libcurl4-openssl-dev,
+                                  libgrpc-dev,
+                                  libgrpc++-dev,
+                                  libprotobuf-dev,
+                                  libprotoc-dev,
+                                  libssl-dev,
+                                  libz-dev,
+                                  lsb-release,
+                                  openssl,
+                                  protobuf-compiler-grpc")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "libcpprest-dev,
+                                  libprotobuf-dev,
+                                  libgrpc-dev,
+                                  libgrpc++-dev,
+                                  libssl-dev")
+
+set(CPACK_DEBIAN_PACKAGE_UPSTREAM_COPYRIGHT_YEAR 2016-2021)
+set(CPACK_DEBIAN_PACKAGE_LICENSE bsd)
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Tao He <sighingnow@gmail.com>")
+set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3/")
+
+set(CPACK_DEBIAN_PACKAGE_INSTALL "/usr/lib/lib*.so*"
+                                 "/usr/lib/cmake/etcd-cpp-api/*.cmake"
+                                 "/usr/include/etcd/*.h"
+                                 "/usr/include/etcd/*.hpp"
+                                 "/usr/include/etcd/v3/*.h"
+                                 "/usr/include/etcd/v3/*.hpp"
+)
+
+set(CPACK_DEBIAN_PACKAGE_BUILD_NUMBER_PREFIX "")
+set(CPACK_DEBIAN_PACKAGE_BUILD_NUMBER 0)
+
+set(CPACK_DEBIAN_PACKAGE_DISTRIBUTION "focal")
+set(DPUT_HOST "ppa:graphscope/etcd-cpp-api")
+set(DPUT_SNAPSHOT_HOST "ppa:graphscope/etcd-cpp-api")
+
+find_program(DEBUILD_EXECUTABLE debuild)
+find_program(DPUT_EXECUTABLE dput)
+
+if(DEBUILD_EXECUTABLE AND DPUT_EXECUTABLE)
+    list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+    include(UploadPPA)
+endif()

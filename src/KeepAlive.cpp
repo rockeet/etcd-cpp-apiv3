@@ -31,11 +31,17 @@ etcd::KeepAlive::KeepAlive(Client const &client, int ttl, int64_t lease_id):
   params.lease_id = this->lease_id;
   params.lease_stub = stubs->leaseServiceStub.get();
 
+  continue_next.store(true);
+
   stubs->call.reset(new etcdv3::AsyncLeaseKeepAliveAction(params));
-  currentTask = pplx::task<void>([this]() {
-    // start refresh
-    this->refresh();
-    context.run();
+  task_ = std::thread([this]() {
+    try {
+      // start refresh
+      this->refresh();
+      context.run();
+    } catch (...) {
+      eptr_ = std::current_exception();
+    }
     context.stop();  // clean up
   });
 }
@@ -50,57 +56,102 @@ etcd::KeepAlive::KeepAlive(std::string const & address,
     KeepAlive(Client(address, username, password), ttl, lease_id) {
 }
 
+etcd::KeepAlive::KeepAlive(Client const &client,
+                           std::function<void (std::exception_ptr)> const &handler,
+                           int ttl, int64_t lease_id):
+    handler_(handler), ttl(ttl), lease_id(lease_id), continue_next(true) {
+  stubs.reset(new EtcdServerStubs{});
+  stubs->leaseServiceStub = Lease::NewStub(client.channel);
+
+  etcdv3::ActionParameters params;
+  params.auth_token.assign(client.auth_token);
+  params.lease_id = this->lease_id;
+  params.lease_stub = stubs->leaseServiceStub.get();
+
+  stubs->call.reset(new etcdv3::AsyncLeaseKeepAliveAction(params));
+  task_ = std::thread([this]() {
+    try {
+      // start refresh
+      this->refresh();
+      context.run();
+    } catch (...) {
+      if (handler_) {
+        handler_(std::current_exception());
+      } else {
+        eptr_ = std::current_exception();
+      }
+      this->Cancel();
+    }
+  });
+}
+
+etcd::KeepAlive::KeepAlive(std::string const & address,
+                           std::function<void (std::exception_ptr)> const &handler,
+                           int ttl, int64_t lease_id):
+    KeepAlive(Client(address), handler, ttl, lease_id) {
+}
+
+etcd::KeepAlive::KeepAlive(std::string const & address,
+                           std::string const & username, std::string const & password,
+                           std::function<void (std::exception_ptr)> const &handler,
+                           int ttl, int64_t lease_id):
+    KeepAlive(Client(address, username, password), handler, ttl, lease_id) {
+}
+
 etcd::KeepAlive::~KeepAlive()
 {
   this->Cancel();
+  // clean up
+  if (task_.joinable()) {
+    task_.join();
+  }
 }
 
 void etcd::KeepAlive::Cancel()
 {
-  if (!continue_next) {
+  if (!continue_next.exchange(false)) {
     return;
   }
-  continue_next = false;
-#ifndef NDEBUG
-  {
-    std::ios::fmtflags os_flags (std::cout.flags());
-    std::cout << "Cancel keepalive for " << std::hex << lease_id << std::endl;
-    std::cout.flags(os_flags);
-  }
-#endif
   stubs->call->CancelKeepAlive();
   if (keepalive_timer_) {
     keepalive_timer_->cancel();
   }
-  currentTask.wait();
+  context.stop();
+}
+
+void etcd::KeepAlive::Check() {
+  if (eptr_) {
+    std::rethrow_exception(eptr_);
+  }
 }
 
 void etcd::KeepAlive::refresh()
 {
-  if (!continue_next) {
+  if (!continue_next.load()) {
     return;
   }
   // minimal resolution: 1 second
   int keepalive_ttl = std::max(ttl - 1, 1);
-#ifndef NDEBUG
-  {
-    std::ios::fmtflags os_flags (std::cout.flags());
-    std::cout << "Trigger the next keepalive round with ttl " << keepalive_ttl
-              << " for " << std::hex << lease_id << std::endl;
-    std::cout.flags(os_flags);
-  }
-#endif
   keepalive_timer_.reset(new boost::asio::steady_timer(
       context, std::chrono::seconds(keepalive_ttl)));
   keepalive_timer_->async_wait([this](const boost::system::error_code& error) {
     if (error) {
 #ifndef NDEBUG
-      std::cerr << "keepalive timer error: " << error << ", " << error.message() << std::endl;
+      std::cerr << "keepalive timer cancelled: " << error << ", " << error.message() << std::endl;
 #endif
     } else {
-      this->stubs->call->Refresh();
-      // trigger the next round;
-      this->refresh();
+      if (this->continue_next.load()) {
+        auto resp = this->stubs->call->Refresh();
+        if (!resp.is_ok()) {
+          throw std::runtime_error("Failed to refresh lease: error code: " + std::to_string(resp.error_code()) +
+                                   ", message: " + resp.error_message());
+        }
+        if (resp.value().ttl() == 0) {
+          throw std::out_of_range("Failed to refresh lease due to expiration: the new TTL is 0.");
+        }
+        // trigger the next round;
+        this->refresh();
+      }
     }
   });
 }
